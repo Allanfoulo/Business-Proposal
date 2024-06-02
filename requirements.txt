@@ -3,3 +3,4 @@ exa_py
 fpdf
 reportlab
 python-dotenv
+python-docx
