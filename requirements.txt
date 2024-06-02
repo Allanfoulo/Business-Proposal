@@ -2,3 +2,4 @@ groq
 exa_py
 fpdf
 reportlab
+python-dotenv
