@@ -97,14 +97,14 @@ def collect_basic_info():
     promotional_strategy=st.text_area("Mention your potential Promotional Strategy")
 
     st.header("Financial Information")
-    current_revenue = st.number_input("Current Revenue ($)", min_value=0.0, format="%f")
-    current_expenses = st.number_input("Current Expenses ($)", min_value=0.0, format="%f")
+    current_revenue = st.number_input("Current Revenue (R)", min_value=0.0, format="%f")
+    current_expenses = st.number_input("Current Expenses (R)", min_value=0.0, format="%f")
     funding_requirements = st.text_area("Funding Requirements")
 
     st.header("Management Team")
     management_team = st.text_area("Key Personnel (name and roles)")
 
-    st.header("Company Strucuture")
+    st.header("Company Structure")
     company_structure=st.text_area("What is your organizational structure")
 
     st.header("Goals and Objectives")

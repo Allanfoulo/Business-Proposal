@@ -4,3 +4,4 @@ fpdf
 python-dotenv
 python-docx
 retrying
+streamlit
