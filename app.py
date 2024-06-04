@@ -1,24 +1,21 @@
 import streamlit as st
-from groq import Groq
-from exa_py import Exa
-from string import Template
+import docx
+import re
 import tempfile
-from dotenv import load_dotenv
 import pathlib
 import os
 import io
 import fpdf
-fpdf.set_global("UTF8", True)
-from fpdf import FPDF
-import docx
-import re
+import time
+from groq import Groq
+from exa_py import Exa
+from string import Template
+from dotenv import load_dotenv
+from retrying import retry
 from funtions import *
-from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.units import inch
-from reportlab.platypus import Paragraph, Frame
-from reportlab.lib.styles import getSampleStyleSheet
-#from reportlab.lib.markup import markup
+from fpdf import FPDF
+fpdf.set_global("UTF8", True)
+
 
 # Load environment variables from .env file
 load_dotenv()
@@ -39,8 +36,7 @@ highlights_options = {
     "highlights_per_url": 1,  # just get the best highlight for each URL
 }
 
-
-
+@retry(wait_exponential_multiplier=1000, wait_exponential_max=10000, stop_max_attempt_number=5)
 def call_llm(prompt):
      
     proposal_parts = []
@@ -67,8 +63,13 @@ def call_llm(prompt):
     proposal_text = "\n\n".join(proposal_parts)
     return proposal_text
 
+# Function to strip markdown and unescape characters
 def strip_md(text):
-    return re.sub(r'([!*_=~-])', r'\\\1', text)
+    text = text.replace("**", "")  # remove bold syntax
+    text = text.replace("*", "")  # remove italic syntax
+    text = text.replace("#", "")  # remove headings
+    text = re.sub(r'([!*_=~-])', r'\\\1', text)
+    return text
 
 
 def collect_basic_info():
@@ -405,37 +406,115 @@ def collect_basic_info():
             financial_graphs_analysis,
             risk_mitigations_analysis
         ]
+        #Section Subheader title
+        section_headers = {
+            "executive_summary":"Executive Summary",
+            "mission_analysis":"Mission Statement",
+            "vision_analysis":"Vision Statement",
+            "objectives_analysis":"Objectives",
+            "core_values_analysis":"Core values",
+            "business_description_analysis":"Business Description Analysis",
+            "company_location_analysis":"Company Location",
+            "products_analysis":"Products",
+            "owner_analysis":"Ownership",
+            "company_structure_analysis":"Company Structure",
+            "management_profile_analysis":"Management Profiles",
+            "operational_strategy_analysis":"Operational Strategy",
+            "marketing_analysis":"Marketing Mix Strategy",
+            "promotional_analysis":"Promotional Strategy",
+            "analyze_demand_analysis":"Market Demand Analysis",
+            "segment_market_analysis":"Market Segment Analysis",
+            "competitor_analysis":"Competitors Analysi",
+            "porters_analysis":"Porter's Five Forces Analysis",
+            "industry_accommodation_analysis":"Industry Analysis",
+            "list_major_players_analysis":"Major Player Analysis",
+            "business_sub_sector_analysis": "Business Sub Sector Analysis",
+            "swot_analysis":"Swot Analysis",
+            "funding_request_analysis":"Funding Request",
+            "financing_plan_analysis":"Financing & Bank Loan Amortization",         
+            "pro_forma_income_statement_analysis":"Income Statement Analysis",
+            "predict_revenue_expenses_analysis":"Revenue Expense Analysis",
+            "monthly_cash_flow_analysis":"Montly Cash Flow Analysis",
+            "pro_forma_annual_cash_flow_analysis": "Pro Forma Annual Cash Flow Analysis",
+            "pro_forma_balance_sheet_analysis": "Pro Forma Balance Sheet Analysis",
+            "break_even_analysis": "Break-Even Analysis",
+            "payback_period_analysis": "Payback Period Analysis",
+            "financial_graphs_analysis": "Financial Graphs Analysis",
+            "risk_mitigations_analysis": "Risk Mitigations Analysis"
+        }
 
+
+        
+
+        # Create a Word document
+        doc = docx.Document()
+
+        # Add title
+        doc.add_heading("Business Proposal", 0)
+
+        # Add sections
         for section in sections:
-            strip_md(section)
-       
+            header_text = ""  # Initialize an empty string
+            for key, value in section_headers.items():
+                if section == eval(key):  # Match variable names from sections list with keys of section_headers dictionary
+                    header_text = value  # Assign the value of the key to header_text
+                    break
+    
 
-            # Create a Word document
-            doc = docx.Document()
 
-            # Add title
-            doc.add_heading("Business Proposal", 0)
+            # Add a Heading 3 for the subheader
+            doc.add_heading(header_text, 3)
 
-            # Add sections
-            for section in sections:
-                doc.add_paragraph(strip_md(section))
+            # Remove Markdown formatting
+            section = strip_md(section)
+            section = section.replace("\\", "")  # Remove backslashes
 
-            # Save the Word document to a BytesIO object
-            mem_file = io.BytesIO()
-            doc.save(mem_file)
-            mem_file.seek(0)
+            p = doc.add_paragraph("")
 
-            # Create a download button
-            st.download_button("Download Business Proposal (Word)", mem_file.getvalue(), "business_proposal.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", key="download_button")
-                        # Add a copy button
-            copy_button = st.button("Copy All Content")
-            if copy_button:
-                # Get all the text content
-                all_text = "\n\n".join(sections)
-                # Create a textarea to copy the content
-                textarea = st.text_area("Copy All Content", value=all_text, height=500, disabled=True)
-                # Select all the text when the button is clicked
-                textarea.select_all()
+            # Check if the section contains bold or italic text
+            parts = section.split("**")
+            p = doc.add_paragraph("")
+            for part in parts:
+                if part:
+                    if parts.index(part) % 2 == 1:
+                        # Add bold text
+                        p.add_run(part).bold = True
+                    else:
+                        # Add non-bold text
+                        p.add_run(part)
+
+            # Check if the section contains headings
+            if "#" in section:
+                heading_parts = section.split("#")
+                for part in heading_parts:
+                    if part:
+                        level = heading_parts.index(part) + 1
+                        doc.add_heading(part, level)
+
+                        
+
+            # Check if the section contains tables
+            if "|" in section:
+                # Split the text into table rows
+                rows = section.split("\n")
+                table = doc.add_table(rows=1, cols=len(rows[0].split("|")))
+                # Initialize your table
+                table = doc.tables[0]  # Assuming you have a Word document with tables
+
+                num_rows = len(table.rows)
+                num_cols = len(table.columns)
+                for row_idx in range(num_rows):
+                    for col_idx in range(num_cols):
+                        cell = section.split("\n")[row_idx].split("|")[col_idx]
+                        table.cell(row_idx, col_idx).text = cell
+
+        # Save the Word document to a BytesIO object
+        mem_file = io.BytesIO()
+        doc.save(mem_file)
+        mem_file.seek(0)
+
+        # Create a download button
+        st.download_button("Download Business Proposal (Word)", mem_file.getvalue(), "business_proposal.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
              
             
