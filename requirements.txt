@@ -4,3 +4,4 @@ fpdf
 reportlab
 python-dotenv
 python-docx
+retrying
