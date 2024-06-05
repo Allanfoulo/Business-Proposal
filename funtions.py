@@ -194,7 +194,7 @@ def list_major_players(data):
 #Business Sub-Sector in Lesotho:
 def analyze_business_sub_sector(data):
     prompt = f"""
-     Analyze the business sub-sector in {data['Location']}'s country for {data['company_name']}. The company operates in the {data['industry']} industry. Provide insights into the sub-sector's growth, opportunities, and challenges.
+     Analyze the business sub-sector in this location's ({data['location']}) country for {data['company_name']}. The company operates in the {data['industry']} industry. Provide insights into the sub-sector's growth, opportunities, and challenges.
     """
     return prompt
 
