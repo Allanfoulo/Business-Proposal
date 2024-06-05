@@ -89,7 +89,7 @@ def generate_business_description(data):
 #Company Location:
 def generate_company_location(data):
     prompt = f"""
-    Describe the location of {data['company_name']}. The company is based in {data['location']}. Provide details about the advantages of this location for the business.
+    Describe the location of {data['company_name']}. The company is based in {data['location']}. Provide details about the advantages of this location for the business, if you can't find the company online assume it's a small unknown startup, just utilize the location.
     """
     return prompt
 
@@ -194,7 +194,7 @@ def list_major_players(data):
 #Business Sub-Sector in Lesotho:
 def analyze_business_sub_sector(data):
     prompt = f"""
-     Analyze the business sub-sector in this location's ({data['location']}) country for {data['company_name']}. The company operates in the {data['industry']} industry. Provide insights into the sub-sector's growth, opportunities, and challenges.
+     Analyze the business sub-sector in this provided location's ({data['location']}) country for {data['company_name']}. The company operates in the {data['industry']} industry. Provide insights into the sub-sector's growth, opportunities, and challenges.
     """
     return prompt
 
