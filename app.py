@@ -93,7 +93,7 @@ def collect_basic_info():
     st.header("Unique Value Proposition")
     value_proposition = st.text_area("Competitive Advantage")
     
-    st.header("Promotional Statrgy")
+    st.header("Promotional Strategy")
     promotional_strategy=st.text_area("Mention your potential Promotional Strategy")
 
     st.header("Financial Information")
