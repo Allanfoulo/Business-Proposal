@@ -151,28 +151,28 @@ def generate_promotional_strategy(data):
 #Demand Analysis:
 def analyze_demand(data):
     prompt = f"""
-    Analyze the market demand for the products/services offered by {data['company_name']}. The company operates in the {data['industry']} industry and targets {data['target_market']}. Provide insights into the demand trends and potential growth.
+    Analyze the market demand for the products/services offered by {data['company_name']}. The company operates in the {data['industry']} industry and targets {data['target_market']}. Provide insights into the demand trends and potential growth in the country of this location {data['location']}.
     """
     return prompt
 
 #Market Segmentation:
 def segment_market(data):
     prompt = f"""
-    Segment the market for {data['company_name']}. The company targets {data['target_market']} and offers {data['products_services']}. Provide detailed market segments based on demographics, geography, behavior, and other relevant factors.
+    Segment the market for {data['company_name']}. The company targets {data['target_market']} and offers {data['products_services']}. Provide detailed market segments based on demographics, geography, behavior, and other relevant factors in the country of this location:{data['location']}.
     """
     return prompt
 
 #Competitor Analysis:
 def analyze_competitors(data):
     prompt = f"""
-    Conduct a competitor analysis for {data['company_name']}. The company operates in the {data['industry']} industry. Identify and analyze the main competitors, their strengths, weaknesses, and market positions.
+    Conduct a competitor analysis for {data['company_name']}. The company operates in the {data['industry']} industry. Identify and analyze the main competitors, their strengths, weaknesses, and market positions in this location's country :{data['location']}.
     """
     return prompt
 
 #Porter's Five Forces:
 def perform_porters_five_forces(data):
     prompt = f"""
-    Perform a Porter's Five Forces analysis for {data['company_name']}. The company operates in the {data['industry']} industry. Analyze the competitive forces including threat of new entrants, bargaining power of suppliers, bargaining power of buyers, threat of substitutes, and industry rivalry.
+    Perform a Porter's Five Forces analysis for {data['company_name']}. The company operates in the {data['industry']} industry. Analyze the competitive forces including threat of new entrants, bargaining power of suppliers, bargaining power of buyers, threat of substitutes, and industry rivalry, first search for those specifically for the country of this location: {data['location']}, then search for the industry worldwide in genereal to get more info.Look for the most relevant info.
     """
     return prompt
 
@@ -187,7 +187,7 @@ def analyze_industry_accommodation(data):
 #Major Players:
 def list_major_players(data):
     prompt = f"""
-    List and describe the major players in the {data['industry']} industry where {data['company_name']} operates. Include details about their market share, strengths, and weaknesses.
+    List and describe the major players in the {data['industry']} industry where {data['company_name']} operates which is mainly in the country of this location:{data['location']}. Include details about their market share, strengths, and weaknesses.
     """
     return prompt
 
