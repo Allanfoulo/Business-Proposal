@@ -37,7 +37,7 @@ highlights_options = {
     "highlights_per_url": 1,  # just get the best highlight for each URL
 }
 
-@retry(wait_fixed=3100, stop_max_attempt_number=6)
+@retry(wait_fixed=5000, stop_max_attempt_number=6)
 def call_llm(prompt):
     proposal_parts = []
     search_response = exa.search_and_contents(query=prompt, highlights=highlights_options, num_results=3, use_autoprompt=True)
