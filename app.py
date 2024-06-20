@@ -7,6 +7,7 @@ import os
 import io
 import fpdf
 import time
+import requests
 from groq import Groq
 from exa_py import Exa
 from string import Template
