@@ -36,7 +36,7 @@ highlights_options = {
     "highlights_per_url": 1,  # just get the best highlight for each URL
 }
 
-@retry(wait_fixed=2100, stop_max_attempt_number=6)
+@retry(wait_fixed=3100, stop_max_attempt_number=6)
 def call_llm(prompt):
      
     proposal_parts = []
