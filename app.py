@@ -38,28 +38,32 @@ highlights_options = {
 
 @retry(wait_fixed=3100, stop_max_attempt_number=6)
 def call_llm(prompt):
-     
     proposal_parts = []
-    #for question in questions:
-    #Insert input data into placeholder in question prompts
-    
     search_response = exa.search_and_contents(query=prompt, highlights=highlights_options, num_results=3, use_autoprompt=True)
     info = [sr.highlights[0] for sr in search_response.results]
-    
+
     system_prompt = "You are a Business proposal generator. Read the provided contexts and, if relevant, use them to answer the user's question."
     user_prompt = f"Sources: {info}\nQuestion: {prompt}"
-    
-    completion = client.chat.completions.create(
-        model=utilized_model,
-        messages=[
+
+    headers = {"Authorization": f"Bearer {os.getenv('GROQ_API_KEY')}"}
+    data = {
+        "model": utilized_model,
+        "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ]
-    )
-    #taking out this Question: {prompt}\n to check if the output will change
-    response = f"Answer: {completion.choices[0].message.content}\n\n"
-    proposal_parts.append(response)
-        
+    }
+
+    response = requests.post("https://api.groq.com/chat/completions", headers=headers, json=data)
+
+    if response.status_code == 429:
+        retry_after = int(response.headers.get("Retry-After", 3))  # Default to 3 seconds if header is missing
+        time.sleep(retry_after)
+
+    response_json = response.json()
+    response_text = f"Answer: {response_json['choices'][0]['message']['content']}\n\n"
+    proposal_parts.append(response_text)
+
     proposal_text = "\n\n".join(proposal_parts)
     return proposal_text
 
