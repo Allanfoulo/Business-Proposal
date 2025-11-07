@@ -6,3 +6,4 @@ python-docx
 tenacity==8.2.3
 streamlit
 cachetools==5.3.2
+flask
