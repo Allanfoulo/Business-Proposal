@@ -5,17 +5,28 @@ import tempfile
 import pathlib
 import os
 import io
-import fpdf
 import time
 import requests
+import logging
 from groq import Groq
 from exa_py import Exa
 from string import Template
 from dotenv import load_dotenv
-from retrying import retry
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+    before_sleep_log
+)
 from funtions import *
 from fpdf import FPDF
-fpdf.set_global("UTF8", True)
+from cache_manager import cache_llm_response
+from llm_parallel import generate_all_sections_parallel, convert_results_to_ordered_list
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 # Load environment variables from .env file
@@ -36,8 +47,14 @@ highlights_options = {
     "num_sentences": 7,  # how long our highlights should be
     "highlights_per_url": 1,  # just get the best highlight for each URL
 }
-
-@retry(wait_fixed=5000, stop_max_attempt_number=6)
+@cache_llm_response
+@retry(
+    wait=wait_exponential(multiplier=1, min=4, max=60),
+    stop=stop_after_attempt(6),
+    retry=retry_if_exception_type((requests.exceptions.RequestException, TimeoutError)),
+    before_sleep=before_sleep_log(logger, logging.WARNING),
+    reraise=True
+)
 def call_llm(prompt):
      
     proposal_parts = []
@@ -70,6 +87,54 @@ def strip_md(text):
     text = text.replace("#", "")  # remove headings
     text = re.sub(r'([!*_=~-])', r'\\\1', text)
     return text
+
+
+def process_markdown_to_runs(paragraph, text):
+    """Efficiently process markdown to Word runs (O(n) complexity)"""
+    text = text.replace("\\", "")
+
+    # Use regex for efficient bold text processing
+    bold_pattern = re.compile(r'\*\*(.*?)\*\*')
+    last_end = 0
+
+    for match in bold_pattern.finditer(text):
+        # Add normal text before bold
+        if match.start() > last_end:
+            paragraph.add_run(text[last_end:match.start()])
+        # Add bold text
+        paragraph.add_run(match.group(1)).bold = True
+        last_end = match.end()
+
+    # Add remaining text
+    if last_end < len(text):
+        paragraph.add_run(text[last_end:])
+
+
+def add_markdown_table(doc, text):
+    """Parse and add markdown tables to document"""
+    rows = [row.strip() for row in text.split('\n')
+            if row.strip() and '|' in row]
+    if not rows:
+        return
+
+    # Parse all cells once (no repeated splitting)
+    table_data = [
+        [cell.strip() for cell in row.split('|') if cell.strip()]
+        for row in rows
+    ]
+
+    if not table_data:
+        return
+
+    # Create table with correct dimensions
+    num_rows = len(table_data)
+    num_cols = len(table_data[0])
+    table = doc.add_table(rows=num_rows, cols=num_cols)
+
+    # Populate efficiently
+    for row_idx, row_data in enumerate(table_data):
+        for col_idx, cell_data in enumerate(row_data[:num_cols]):
+            table.cell(row_idx, col_idx).text = cell_data
 
 
 def collect_basic_info():
@@ -406,45 +471,61 @@ def collect_basic_info():
             financial_graphs_analysis,
             risk_mitigations_analysis
         ]
-        #Section Subheader title
-        section_headers = {
-            "executive_summary":"Executive Summary",
-            "mission_analysis":"Mission Statement",
-            "vision_analysis":"Vision Statement",
-            "objectives_analysis":"Objectives",
-            "core_values_analysis":"Core values",
-            "business_description_analysis":"Business Description Analysis",
-            "company_location_analysis":"Company Location",
-            "products_analysis":"Products",
-            "owner_analysis":"Ownership",
-            "company_structure_analysis":"Company Structure",
-            "management_profile_analysis":"Management Profiles",
-            "operational_strategy_analysis":"Operational Strategy",
-            "marketing_analysis":"Marketing Mix Strategy",
-            "promotional_analysis":"Promotional Strategy",
-            "analyze_demand_analysis":"Market Demand Analysis",
-            "segment_market_analysis":"Market Segment Analysis",
-            "competitor_analysis":"Competitors Analysi",
-            "porters_analysis":"Porter's Five Forces Analysis",
-            "industry_accommodation_analysis":"Industry Analysis",
-            "list_major_players_analysis":"Major Player Analysis",
-            "business_sub_sector_analysis": "Business Sub Sector Analysis",
-            "swot_analysis":"Swot Analysis",
-            "funding_request_analysis":"Funding Request",
-            "financing_plan_analysis":"Financing & Bank Loan Amortization",         
-            "pro_forma_income_statement_analysis":"Income Statement Analysis",
-            "predict_revenue_expenses_analysis":"Revenue Expense Analysis",
-            "monthly_cash_flow_analysis":"Montly Cash Flow Analysis",
-            "pro_forma_annual_cash_flow_analysis": "Pro Forma Annual Cash Flow Analysis",
-            "pro_forma_balance_sheet_analysis": "Pro Forma Balance Sheet Analysis",
-            "break_even_analysis": "Break-Even Analysis",
-            "payback_period_analysis": "Payback Period Analysis",
-            "financial_graphs_analysis": "Financial Graphs Analysis",
-            "risk_mitigations_analysis": "Risk Mitigations Analysis"
+        # Map section content to headers (for PDF and DOCX)
+        section_to_header = {
+            executive_summary: "Executive Summary",
+            mission_analysis: "Mission Statement",
+            vision_analysis: "Vision Statement",
+            objectives_analysis: "Objectives",
+            core_values_analysis: "Core values",
+            business_description_analysis: "Business Description Analysis",
+            company_location_analysis: "Company Location",
+            products_analysis: "Products",
+            owner_analysis: "Ownership",
+            company_structure_analysis: "Company Structure",
+            management_profile_analysis: "Management Profiles",
+            operational_strategy_analysis: "Operational Strategy",
+            marketing_analysis: "Marketing Mix Strategy",
+            promotional_analysis: "Promotional Strategy",
+            analyze_demand_analysis: "Market Demand Analysis",
+            segment_market_analysis: "Market Segment Analysis",
+            competitor_analysis: "Competitors Analysis",
+            porters_analysis: "Porter's Five Forces Analysis",
+            industry_accommodation_analysis: "Industry Analysis",
+            list_major_players_analysis: "Major Player Analysis",
+            business_sub_sector_analysis: "Business Sub Sector Analysis",
+            swot_analysis: "Swot Analysis",
+            funding_request_analysis: "Funding Request",
+            financing_plan_analysis: "Financing & Bank Loan Amortization",
+            pro_forma_income_statement_analysis: "Income Statement Analysis",
+            predict_revenue_expenses_analysis: "Revenue Expense Analysis",
+            monthly_cash_flow_analysis: "Monthly Cash Flow Analysis",
+            pro_forma_annual_cash_flow_analysis: "Pro Forma Annual Cash Flow Analysis",
+            pro_forma_balance_sheet_analysis: "Pro Forma Balance Sheet Analysis",
+            break_even_analysis: "Break-Even Analysis",
+            payback_period_analysis: "Payback Period Analysis",
+            financial_graphs_analysis: "Financial Graphs Analysis",
+            risk_mitigations_analysis: "Risk Mitigations Analysis"
         }
 
+        # Populate PDF with sections
+        for section in sections:
+            header_text = section_to_header.get(section, "Section")
 
-        
+            # Add section header
+            pdf.set_font("Arial", 'B', 14)
+            pdf.cell(0, 10, header_text, ln=True)
+
+            # Add section content
+            pdf.set_font("Arial", size=12)
+            content = strip_md(section)
+            pdf.multi_cell(0, 10, content)
+            pdf.ln(5)
+
+        # Save PDF to BytesIO
+        pdf_mem_file = io.BytesIO()
+        pdf_mem_file.write(pdf.output(dest='S').encode('latin1'))
+        pdf_mem_file.seek(0)
 
         # Create a Word document
         doc = docx.Document()
@@ -454,67 +535,41 @@ def collect_basic_info():
 
         # Add sections
         for section in sections:
-            header_text = ""  # Initialize an empty string
-            for key, value in section_headers.items():
-                if section == eval(key):  # Match variable names from sections list with keys of section_headers dictionary
-                    header_text = value  # Assign the value of the key to header_text
-                    break
-    
-
+            header_text = section_to_header.get(section, "Section")
 
             # Add a Heading 3 for the subheader
             doc.add_heading(header_text, 3)
 
-            # Remove Markdown formatting
-            section = strip_md(section)
-            section = section.replace("\\", "")  # Remove backslashes
+            # Remove Markdown formatting and add runs efficiently
+            section_text = strip_md(section)
+            section_text = section_text.replace("\\", "")
 
-            p = doc.add_paragraph("")
+            p = doc.add_paragraph()
+            process_markdown_to_runs(p, section_text)
 
-            # Check if the section contains bold or italic text
-            parts = section.split("**")
-            p = doc.add_paragraph("")
-            for part in parts:
-                if part:
-                    if parts.index(part) % 2 == 1:
-                        # Add bold text
-                        p.add_run(part).bold = True
-                    else:
-                        # Add non-bold text
-                        p.add_run(part)
-
-            # Check if the section contains headings
-            if "#" in section:
-                heading_parts = section.split("#")
-                for part in heading_parts:
-                    if part:
-                        level = heading_parts.index(part) + 1
-                        doc.add_heading(part, level)
-
-                        
-
-            # Check if the section contains tables
-            if "|" in section:
-                # Split the text into table rows
-                rows = section.split("\n")
-                table = doc.add_table(rows=1, cols=len(rows[0].split("|")))
-                # Initialize your table
-                table = doc.tables[0]  # Assuming you have a Word document with tables
-
-                num_rows = len(table.rows)
-                num_cols = len(table.columns)
-                for row_idx in range(num_rows):
-                    for col_idx in range(num_cols):
-                        cell = section.split("\n")[row_idx].split("|")[col_idx]
-                        table.cell(row_idx, col_idx).text = cell
+            # Add markdown table if present
+            if "|" in section_text:
+                add_markdown_table(doc, section_text)
 
         # Save the Word document to a BytesIO object
         mem_file = io.BytesIO()
         doc.save(mem_file)
         mem_file.seek(0)
 
-        # Create a download button
-        st.download_button("Download Business Proposal (Word)", mem_file.getvalue(), "business_proposal.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        # Create download buttons
+        st.download_button(
+            "Download Business Proposal (PDF)",
+            pdf_mem_file.getvalue(),
+            "business_proposal.pdf",
+            "application/pdf"
+        )
+
+        st.download_button(
+            "Download Business Proposal (Word)",
+            mem_file.getvalue(),
+            "business_proposal.docx",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
 
              
             
