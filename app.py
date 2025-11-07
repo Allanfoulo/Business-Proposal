@@ -84,9 +84,8 @@ def call_llm(prompt):
             {"role": "user", "content": user_prompt},
         ],
         temperature=1,
-        max_completion_tokens=8192,
+        max_tokens=8192,
         top_p=1,
-        reasoning_effort="medium",
         stream=True,
         stop=None
     )
