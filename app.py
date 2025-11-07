@@ -37,7 +37,7 @@ exa = Exa(api_key=os.getenv("EXA_API_KEY"))
 
 # Define your API Model and key (replace 'your-api-key' with the actual key)
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-utilized_model = "llama3-70b-8192"
+utilized_model = "openai/gpt-oss-120b"
 
 #the file path that contains the prompt
 file_path = os.path.join(os.getcwd(), "plugins/modular_business_proposal")
