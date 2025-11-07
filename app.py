@@ -31,6 +31,10 @@ logger = logging.getLogger(__name__)
 
 # Load environment variables from .env file
 load_dotenv()
+# Fallback to project root .env when running from worktree
+root_env_path = pathlib.Path(__file__).resolve().parents[2] / ".env"
+if root_env_path.exists():
+    load_dotenv(dotenv_path=str(root_env_path))
 
 #declare the exa search api
 exa = Exa(api_key=os.getenv("EXA_API_KEY"))
