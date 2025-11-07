@@ -56,7 +56,7 @@ highlights_options = {
     reraise=True
 )
 def call_llm(prompt):
-     
+
     proposal_parts = []
     #for question in questions:
     #Insert input data into placeholder in question prompts
@@ -72,12 +72,29 @@ def call_llm(prompt):
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
-        ]
+        ],
+        temperature=1,
+        max_completion_tokens=8192,
+        top_p=1,
+        reasoning_effort="medium",
+        stream=True,
+        stop=None
     )
-    #taking out this Question: {prompt}\n to check if the output will change
-    response = f"Answer: {completion.choices[0].message.content}\n\n"
+
+    # Collect streamed chunks into a single response string
+    streamed_parts = []
+    for chunk in completion:
+        try:
+            content_chunk = chunk.choices[0].delta.content or ""
+        except Exception:
+            content_chunk = ""
+        if content_chunk:
+            streamed_parts.append(content_chunk)
+
+    response_text = "".join(streamed_parts)
+    response = f"Answer: {response_text}\n\n"
     proposal_parts.append(response)
-        
+
     proposal_text = "\n\n".join(proposal_parts)
     return proposal_text
 # Function to strip markdown and unescape characters
