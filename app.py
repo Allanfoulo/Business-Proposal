@@ -11,7 +11,7 @@ import logging
 from groq import Groq
 from exa_py import Exa
 from string import Template
-from dotenv import load_dotenv
+from dotenv import load_dotenv, dotenv_values
 from tenacity import (
     retry,
     stop_after_attempt,
@@ -35,12 +35,18 @@ load_dotenv()
 root_env_path = pathlib.Path(__file__).resolve().parents[2] / ".env"
 if root_env_path.exists():
     load_dotenv(dotenv_path=str(root_env_path))
+    _root_env = dotenv_values(str(root_env_path))
+else:
+    _root_env = {}
+
+EXA_API_KEY = os.getenv("EXA_API_KEY") or _root_env.get("EXA_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY") or _root_env.get("GROQ_API_KEY")
 
 #declare the exa search api
-exa = Exa(api_key=os.getenv("EXA_API_KEY"))
+exa = Exa(api_key=EXA_API_KEY)
 
 # Define your API Model and key (replace 'your-api-key' with the actual key)
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+client = Groq(api_key=GROQ_API_KEY)
 utilized_model = "openai/gpt-oss-120b"
 
 #the file path that contains the prompt
