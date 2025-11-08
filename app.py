@@ -5,28 +5,49 @@ import tempfile
 import pathlib
 import os
 import io
-import fpdf
 import time
 import requests
+import logging
 from groq import Groq
 from exa_py import Exa
 from string import Template
-from dotenv import load_dotenv
-from retrying import retry
+from dotenv import load_dotenv, dotenv_values
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+    before_sleep_log
+)
 from funtions import *
 from fpdf import FPDF
-fpdf.set_global("UTF8", True)
+from cache_manager import cache_llm_response
+from llm_parallel import generate_all_sections_parallel, convert_results_to_ordered_list
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 # Load environment variables from .env file
 load_dotenv()
+# Fallback to project root .env when running from worktree
+root_env_path = pathlib.Path(__file__).resolve().parents[2] / ".env"
+if root_env_path.exists():
+    load_dotenv(dotenv_path=str(root_env_path))
+    _root_env = dotenv_values(str(root_env_path))
+else:
+    _root_env = {}
+
+EXA_API_KEY = os.getenv("EXA_API_KEY") or _root_env.get("EXA_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY") or _root_env.get("GROQ_API_KEY")
 
 #declare the exa search api
-exa = Exa(api_key=os.getenv("EXA_API_KEY"))
+exa = Exa(api_key=EXA_API_KEY)
 
 # Define your API Model and key (replace 'your-api-key' with the actual key)
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-utilized_model = "llama3-70b-8192"
+client = Groq(api_key=GROQ_API_KEY)
+utilized_model = "openai/gpt-oss-120b"
 
 #the file path that contains the prompt
 file_path = os.path.join(os.getcwd(), "plugins/modular_business_proposal")
@@ -36,10 +57,16 @@ highlights_options = {
     "num_sentences": 7,  # how long our highlights should be
     "highlights_per_url": 1,  # just get the best highlight for each URL
 }
-
-@retry(wait_fixed=5000, stop_max_attempt_number=6)
+@cache_llm_response
+@retry(
+    wait=wait_exponential(multiplier=1, min=4, max=60),
+    stop=stop_after_attempt(6),
+    retry=retry_if_exception_type((requests.exceptions.RequestException, TimeoutError)),
+    before_sleep=before_sleep_log(logger, logging.WARNING),
+    reraise=True
+)
 def call_llm(prompt):
-     
+
     proposal_parts = []
     #for question in questions:
     #Insert input data into placeholder in question prompts
@@ -55,12 +82,28 @@ def call_llm(prompt):
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
-        ]
+        ],
+        temperature=1,
+        max_tokens=8192,
+        top_p=1,
+        stream=True,
+        stop=None
     )
-    #taking out this Question: {prompt}\n to check if the output will change
-    response = f"Answer: {completion.choices[0].message.content}\n\n"
+
+    # Collect streamed chunks into a single response string
+    streamed_parts = []
+    for chunk in completion:
+        try:
+            content_chunk = chunk.choices[0].delta.content or ""
+        except Exception:
+            content_chunk = ""
+        if content_chunk:
+            streamed_parts.append(content_chunk)
+
+    response_text = "".join(streamed_parts)
+    response = f"Answer: {response_text}\n\n"
     proposal_parts.append(response)
-        
+
     proposal_text = "\n\n".join(proposal_parts)
     return proposal_text
 # Function to strip markdown and unescape characters
@@ -70,6 +113,54 @@ def strip_md(text):
     text = text.replace("#", "")  # remove headings
     text = re.sub(r'([!*_=~-])', r'\\\1', text)
     return text
+
+
+def process_markdown_to_runs(paragraph, text):
+    """Efficiently process markdown to Word runs (O(n) complexity)"""
+    text = text.replace("\\", "")
+
+    # Use regex for efficient bold text processing
+    bold_pattern = re.compile(r'\*\*(.*?)\*\*')
+    last_end = 0
+
+    for match in bold_pattern.finditer(text):
+        # Add normal text before bold
+        if match.start() > last_end:
+            paragraph.add_run(text[last_end:match.start()])
+        # Add bold text
+        paragraph.add_run(match.group(1)).bold = True
+        last_end = match.end()
+
+    # Add remaining text
+    if last_end < len(text):
+        paragraph.add_run(text[last_end:])
+
+
+def add_markdown_table(doc, text):
+    """Parse and add markdown tables to document"""
+    rows = [row.strip() for row in text.split('\n')
+            if row.strip() and '|' in row]
+    if not rows:
+        return
+
+    # Parse all cells once (no repeated splitting)
+    table_data = [
+        [cell.strip() for cell in row.split('|') if cell.strip()]
+        for row in rows
+    ]
+
+    if not table_data:
+        return
+
+    # Create table with correct dimensions
+    num_rows = len(table_data)
+    num_cols = len(table_data[0])
+    table = doc.add_table(rows=num_rows, cols=num_cols)
+
+    # Populate efficiently
+    for row_idx, row_data in enumerate(table_data):
+        for col_idx, cell_data in enumerate(row_data[:num_cols]):
+            table.cell(row_idx, col_idx).text = cell_data
 
 
 def collect_basic_info():
@@ -134,387 +225,186 @@ def collect_basic_info():
             "goals_objectives": goals_objectives,
             "operational_strategy": operational_strategy,
             "market_overview": market_overview,
-            "company_structure":company_structure,
-            "promotional_strategy":promotional_strategy
+            "company_structure": company_structure,
+            "promotional_strategy": promotional_strategy
         }
         st.write("Collected Information:", data)
-        # Further processing can be done here (e.g., calling AI to generate the business proposal)
 
-        
+        # Phase 3: Parallel section generation controls
+        st.sidebar.header("Generation Settings")
+        parallel_enabled = st.sidebar.checkbox("Generate sections in parallel (faster)", value=True)
+        max_workers = st.sidebar.slider("Concurrent LLM calls", min_value=1, max_value=12, value=5)
+
         st.title("Business Proposal Generator")
 
-        #output=call_llm(data)
-        #st.write(output)
-        # Generate and display executive summary
-        exec_summary_prompt = generate_executive_summary(data)
-        executive_summary = call_llm(exec_summary_prompt)
-        st.subheader("Executive Summary")
-        st.write(executive_summary)
-        
-        
+        # Define section generators with keys
+        section_generators = [
+            ("executive_summary", generate_executive_summary),
+            ("mission", generate_mission),
+            ("vision", generate_vision),
+            ("objectives", generate_objectives),
+            ("core_values", generate_core_values),
+            ("business_description", generate_business_description),
+            ("company_location", generate_company_location),
+            ("products", generate_products),
+            ("ownership", generate_ownership),
+            ("company_structure", generate_company_structure),
+            ("management_profiles", generate_management_profiles),
+            ("operational_strategy", generate_operational_strategy),
+            ("marketing_mix", generate_marketing_mix),
+            ("promotional_strategy", generate_promotional_strategy),
+            ("demand_analysis", analyze_demand),
+            ("market_segmentation", segment_market),
+            ("competitor_analysis", analyze_competitors),
+            ("porters_five_forces", perform_porters_five_forces),
+            ("industry_accommodation", analyze_industry_accommodation),
+            ("major_players", list_major_players),
+            ("business_sub_sector", analyze_business_sub_sector),
+            ("swot_analysis", generate_swot_analysis),
+            ("funding_request", generate_funding_request),
+            ("financing_plan", create_financing_plan),
+            ("pro_forma_income_statement", generate_pro_forma_income_statement),
+            ("revenue_expenses_predictions", predict_revenue_expenses),
+            ("monthly_cash_flow", generate_monthly_cash_flow),
+            ("pro_forma_annual_cash_flow", generate_pro_forma_annual_cash_flow),
+            ("pro_forma_balance_sheet", generate_pro_forma_balance_sheet),
+            ("break_even_analysis", perform_break_even_analysis),
+            ("payback_period", calculate_payback_period),
+            ("financial_graphs", generate_financial_graphs),
+            ("risk_mitigations", identify_risks_mitigations),
+        ]
 
-        #2. Mission, Objectives, and Keys to Success
+        section_order = [key for key, _ in section_generators]
 
-        #Mission Statement:
- 
-        mission_prompt =generate_mission(data)
-        mission_analysis = call_llm(mission_prompt)
-        st.subheader("Mission Statement")
-        st.write(mission_analysis)
+        # Generate sections (parallel or sequential fallback)
+        if parallel_enabled:
+            results_map = generate_all_sections_parallel(
+                data,
+                call_llm,
+                section_generators,
+                max_workers=max_workers
+            )
+        else:
+            st.info("Generating sections sequentially...")
+            results_map = {}
+            progress_bar = st.progress(0)
+            total_tasks = len(section_generators)
+            for idx, (section_name, generator) in enumerate(section_generators, start=1):
+                try:
+                    prompt = generator(data)
+                    results_map[section_name] = call_llm(prompt)
+                    progress_bar.progress(idx / total_tasks)
+                except Exception as e:
+                    st.error(f"Error generating {section_name}: {e}")
+                    results_map[section_name] = f"[Error generating {section_name}: {str(e)}]"
+            progress_bar.empty()
 
-        #Vision Statement:
-        vision_statement_prompt = generate_vision(data)
-        vision_analysis = call_llm(vision_statement_prompt)
-        st.subheader("Vision Statement:")
-        st.write(vision_analysis)
+        # Section headers mapping by key
+        section_to_header = {
+            "executive_summary": "Executive Summary",
+            "mission": "Mission Statement",
+            "vision": "Vision Statement",
+            "objectives": "Objectives",
+            "core_values": "Core Values",
+            "business_description": "Business Description Analysis",
+            "company_location": "Company Location",
+            "products": "Products",
+            "ownership": "Ownership",
+            "company_structure": "Company Structure",
+            "management_profiles": "Management Profiles",
+            "operational_strategy": "Operational Strategy Analysis",
+            "marketing_mix": "Marketing Mix Strategy",
+            "promotional_strategy": "Promotional Strategy",
+            "demand_analysis": "Demand Analysis",
+            "market_segmentation": "Market Segment Analysis",
+            "competitor_analysis": "Competitor Analysis",
+            "porters_five_forces": "Porter's Five Forces Analysis",
+            "industry_accommodation": "Industry Analysis",
+            "major_players": "Major Players",
+            "business_sub_sector": "Business Sub-Sector Analysis",
+            "swot_analysis": "SWOT Analysis",
+            "funding_request": "Funding Request",
+            "financing_plan": "Financing & Bank Loan Amortization",
+            "pro_forma_income_statement": "Pro Forma Income Statement",
+            "revenue_expenses_predictions": "Revenue and Expenses Predictions",
+            "monthly_cash_flow": "Monthly Cash Flow Statement",
+            "pro_forma_annual_cash_flow": "Pro Forma Annual Cash Flow",
+            "pro_forma_balance_sheet": "Pro Forma Balance Sheet",
+            "break_even_analysis": "Break Even Analysis",
+            "payback_period": "Payback Period Analysis",
+            "financial_graphs": "Financial Graphs",
+            "risk_mitigations": "Risk and Mitigatory Measures",
+        }
 
-        #Objectives
-        objectives_prompt= generate_objectives(data)
-        objectives_analysis = call_llm(objectives_prompt)
-        st.subheader("Objectives")
-        st.write(objectives_analysis)
-
-        #Core Values:
-        core_values_prompt = generate_core_values(data)
-        core_values_analysis = call_llm(core_values_prompt)
-        st.subheader("Core Values:")
-        st.write(core_values_analysis)
-
-        #3. Company Summary
-        #Business Description
-        business_description_prompt = generate_business_description(data)
-        business_description_analysis = call_llm(business_description_prompt)
-        st.subheader("Business Descrtiption Analysis")
-        st.write(business_description_analysis)
-
-        #Company Location:
-
-        company_location_prompt = generate_company_location(data)
-        company_location_analysis = call_llm(company_location_prompt)
-        st.subheader("Company location")
-        st.write(company_location_analysis)
-
-        #Products:
-        products_prompt = generate_products(data)
-        products_analysis = call_llm(products_prompt)
-        st.subheader("Products")
-        st.write(products_analysis)
-
-        #Ownership:
-        ownership_prompt = generate_ownership(data)
-        owner_analysis = call_llm(ownership_prompt)
-        st.subheader("Ownership")
-        st.write(owner_analysis)
-
-        #Company Structure:
-        company_structure_prompt = generate_company_structure(data)
-        company_structure_analysis = call_llm(company_structure_prompt)
-        st.subheader("Company Structure")
-        st.write(company_structure_analysis)
-
-        #Management Profiles:
-        management_profile_prompt = generate_management_profiles(data)
-        management_profile_analysis = call_llm(management_profile_prompt)
-        st.subheader("Management Profiles")
-        st.write(management_profile_analysis)
-
-        #4. Operational Strategy
-        operational_strategy_prompt = generate_operational_strategy(data)
-        operational_strategy_analysis = call_llm(operational_strategy_prompt)
-        st.subheader("Operational Strategy Analysis")
-        st.write(operational_strategy_analysis)
-
-        #5. Marketing Strategy
-        #Marketing Mix:
-        marketing_prompt = generate_marketing_mix(data)
-        marketing_analysis = call_llm(marketing_prompt)
-        st.subheader("Marketing Mix Strategy")
-        st.write(marketing_analysis)
-        
-
-        #Promotional Strategy:
-        promotional_prompt = generate_promotional_strategy(data)
-        promotional_analysis = call_llm(promotional_prompt)
-        st.subheader("Promotional Strategy")
-        st.write(promotional_analysis)
-
-        #6. Market Analysis
-        #Demand Analysis:
-        analyze_demand_prompt = analyze_demand(data)
-        analyze_demand_analysis = call_llm(analyze_demand_prompt)
-        st.subheader("Demand Analysis")
-        st.write(analyze_demand_analysis)
-
-        #Market Segmentation:
-        segment_market_prompt = segment_market(data)
-        segment_market_analysis = call_llm(segment_market_prompt)
-        st.subheader("Market Segment Analysis")
-        st.write(segment_market_analysis)
-
-        #Competitor Analysis:
-        competitor_analysis_prompt = analyze_competitors(data)
-        competitor_analysis = call_llm(competitor_analysis_prompt)
-        st.subheader("Competitor Analysis")
-        st.write(competitor_analysis)
-
-        #Porter's Five Forces:
-        porters_prompt =perform_porters_five_forces(data)
-        porters_analysis = call_llm(porters_prompt)
-        st.subheader("Porter's Five Forces Analysis")
-        st.write(porters_analysis)
-
-        #7. Industry Analysis
-        #Industry Accommodation:
-        st.subheader("Industry Analysis")
-        industry_accommodation_prompt = analyze_industry_accommodation(data)
-        industry_accommodation_analysis = call_llm(industry_accommodation_prompt)
-        st.write(industry_accommodation_analysis)
-        #Major Players:
-        st.subheader("Major Players")
-        list_major_players_prompt = list_major_players(data)
-        list_major_players_analysis = call_llm(list_major_players_prompt)
-        st.write(list_major_players_analysis)
-
-        #Business Sub-Sector in Lesotho:
-        st.subheader("Business Sub-Sector Analysis")
-        business_sub_sector_analysis_prompt = analyze_business_sub_sector(data)
-        business_sub_sector_analysis = call_llm(business_sub_sector_analysis_prompt)
-        st.write(business_sub_sector_analysis)
-
-        #8. SWOT Analysis
-        # Generate and display SWOT analysis
-        swot_prompt = generate_swot_analysis(data)
-        swot_analysis = call_llm(swot_prompt)
-        st.subheader("SWOT Analysis")
-        st.write(swot_analysis)
-
-        #9Financial Statements
-        #Funding Request:
-        st.subheader("Funding Request")
-        funding_request_prompt = generate_funding_request(data)
-        funding_request_analysis = call_llm(funding_request_prompt)
-        st.write(funding_request_analysis)
-
-        #Financing & Bank Loan Amortization:
-        st.subheader("Financing & Bank Loan Amortization")
-        financing_plan_prompt = create_financing_plan(data)
-        financing_plan_analysis = call_llm(financing_plan_prompt)
-        st.write(financing_plan_analysis)
-
-        #Pro Forma Income Statement:
-        st.subheader("Pro Forma Income Statement")
-        pro_forma_income_statement_prompt = generate_pro_forma_income_statement(data)
-        pro_forma_income_statement_analysis = call_llm(pro_forma_income_statement_prompt)
-        st.write(pro_forma_income_statement_analysis)
-
-        #10. Assumptions/Predictions
-        #Revenue and Expenses Predictions:
-        st.subheader("Revenue and Expenses Predictions")
-        predict_revenue_expenses_prompt = predict_revenue_expenses(data)
-        predict_revenue_expenses_analysis = call_llm(predict_revenue_expenses_prompt)
-        st.write(predict_revenue_expenses_analysis)
-
-        #Monthly Cash Flow Statement:
-        st.subheader("Monthly Cash Flow Statement")
-        monthly_cash_flow_prompt = generate_monthly_cash_flow(data)
-        monthly_cash_flow_analysis = call_llm(monthly_cash_flow_prompt)
-        st.write(monthly_cash_flow_analysis)
-
-        #Pro Forma Annual Cash Flow:
-        st.subheader("Pro Forma Annual Cash Flow")
-        pro_forma_annual_cash_flow_prompt = generate_pro_forma_annual_cash_flow(data)
-        pro_forma_annual_cash_flow_analysis = call_llm(pro_forma_annual_cash_flow_prompt)
-        st.write(pro_forma_annual_cash_flow_analysis)
-
-        #Pro Forma Balance Sheet:
-        st.subheader("Pro Forma Balance Sheet")
-        pro_forma_balance_sheet_prompt = generate_pro_forma_balance_sheet(data)
-        pro_forma_balance_sheet_analysis = call_llm(pro_forma_balance_sheet_prompt)
-        st.write(pro_forma_balance_sheet_analysis)
-
-        #Break Even Analysis:
-        st.subheader("Break Even Analysis")
-        break_even_analysis_prompt = perform_break_even_analysis(data)
-        break_even_analysis = call_llm(break_even_analysis_prompt)
-        st.write(break_even_analysis)
-
-        #Payback Period Analysis:
-        payback_period_prompt = calculate_payback_period(data)
-        payback_period_analysis = call_llm(payback_period_prompt)
-        st.subheader("Payback Period Analysis")
-        st.write(payback_period_analysis)
-
-        #Financial Graphs:
-        financial_graphs_prompt = generate_financial_graphs(data)
-        financial_graphs_analysis = call_llm(financial_graphs_prompt)
-        st.subheader("Financial Graphs")
-        st.write(financial_graphs_analysis)
-
-        #11. Risk and Mitigatory Measures
-        risk_mitigations_prompt = identify_risks_mitigations(data)
-        risk_mitigations_analysis = call_llm(risk_mitigations_prompt)
-        st.subheader("Risk and Mitigatory Measures")
-        st.write(risk_mitigations_analysis)
+        # Display all sections in order
+        for key in section_order:
+            st.subheader(section_to_header.get(key, key))
+            st.write(results_map.get(key, f"[Missing: {key}]"))
 
         # Create a PDF object
         pdf = FPDF()
-
-        # Add a page
         pdf.add_page()
-
-        # Set font
         pdf.set_font("Arial", size=12)
 
         # Add title
         pdf.cell(0, 10, txt="Business Proposal", ln=True, align="C")
         pdf.ln(10)
 
-        # Add sections
-        sections = [
-            executive_summary,
-            mission_analysis,
-            vision_analysis,
-            objectives_analysis,
-            core_values_analysis,
-            business_description_analysis,
-            company_location_analysis,
-            products_analysis,
-            owner_analysis,
-            company_structure_analysis,
-            management_profile_analysis,
-            operational_strategy_analysis,
-            marketing_analysis,
-            promotional_analysis,
-            analyze_demand_analysis,
-            segment_market_analysis,
-            competitor_analysis,
-            porters_analysis,
-            industry_accommodation_analysis,
-            list_major_players_analysis,
-            business_sub_sector_analysis,
-            swot_analysis,
+        # Populate PDF with sections by key
+        for key in section_order:
+            header_text = section_to_header.get(key, "Section")
+            content_text = results_map.get(key, f"[Missing: {key}]")
 
-            funding_request_analysis,
-            financing_plan_analysis,
-            pro_forma_income_statement_analysis,
-            predict_revenue_expenses_analysis,
-            monthly_cash_flow_analysis,
-            pro_forma_annual_cash_flow_analysis,
-            pro_forma_balance_sheet_analysis,
-            break_even_analysis,
-            payback_period_analysis,
-            financial_graphs_analysis,
-            risk_mitigations_analysis
-        ]
-        #Section Subheader title
-        section_headers = {
-            "executive_summary":"Executive Summary",
-            "mission_analysis":"Mission Statement",
-            "vision_analysis":"Vision Statement",
-            "objectives_analysis":"Objectives",
-            "core_values_analysis":"Core values",
-            "business_description_analysis":"Business Description Analysis",
-            "company_location_analysis":"Company Location",
-            "products_analysis":"Products",
-            "owner_analysis":"Ownership",
-            "company_structure_analysis":"Company Structure",
-            "management_profile_analysis":"Management Profiles",
-            "operational_strategy_analysis":"Operational Strategy",
-            "marketing_analysis":"Marketing Mix Strategy",
-            "promotional_analysis":"Promotional Strategy",
-            "analyze_demand_analysis":"Market Demand Analysis",
-            "segment_market_analysis":"Market Segment Analysis",
-            "competitor_analysis":"Competitors Analysi",
-            "porters_analysis":"Porter's Five Forces Analysis",
-            "industry_accommodation_analysis":"Industry Analysis",
-            "list_major_players_analysis":"Major Player Analysis",
-            "business_sub_sector_analysis": "Business Sub Sector Analysis",
-            "swot_analysis":"Swot Analysis",
-            "funding_request_analysis":"Funding Request",
-            "financing_plan_analysis":"Financing & Bank Loan Amortization",         
-            "pro_forma_income_statement_analysis":"Income Statement Analysis",
-            "predict_revenue_expenses_analysis":"Revenue Expense Analysis",
-            "monthly_cash_flow_analysis":"Montly Cash Flow Analysis",
-            "pro_forma_annual_cash_flow_analysis": "Pro Forma Annual Cash Flow Analysis",
-            "pro_forma_balance_sheet_analysis": "Pro Forma Balance Sheet Analysis",
-            "break_even_analysis": "Break-Even Analysis",
-            "payback_period_analysis": "Payback Period Analysis",
-            "financial_graphs_analysis": "Financial Graphs Analysis",
-            "risk_mitigations_analysis": "Risk Mitigations Analysis"
-        }
+            pdf.set_font("Arial", 'B', 14)
+            pdf.cell(0, 10, header_text, ln=True)
 
+            pdf.set_font("Arial", size=12)
+            content = strip_md(content_text)
+            pdf.multi_cell(0, 10, content)
+            pdf.ln(5)
 
-        
+        # Save PDF to BytesIO
+        pdf_mem_file = io.BytesIO()
+        pdf_mem_file.write(pdf.output(dest='S').encode('latin1'))
+        pdf_mem_file.seek(0)
 
         # Create a Word document
         doc = docx.Document()
-
-        # Add title
         doc.add_heading("Business Proposal", 0)
 
-        # Add sections
-        for section in sections:
-            header_text = ""  # Initialize an empty string
-            for key, value in section_headers.items():
-                if section == eval(key):  # Match variable names from sections list with keys of section_headers dictionary
-                    header_text = value  # Assign the value of the key to header_text
-                    break
-    
+        # Add sections in order
+        for key in section_order:
+            header_text = section_to_header.get(key, "Section")
+            content_text = results_map.get(key, f"[Missing: {key}]")
 
-
-            # Add a Heading 3 for the subheader
             doc.add_heading(header_text, 3)
 
-            # Remove Markdown formatting
-            section = strip_md(section)
-            section = section.replace("\\", "")  # Remove backslashes
+            section_text = strip_md(content_text).replace("\\", "")
+            p = doc.add_paragraph()
+            process_markdown_to_runs(p, section_text)
 
-            p = doc.add_paragraph("")
-
-            # Check if the section contains bold or italic text
-            parts = section.split("**")
-            p = doc.add_paragraph("")
-            for part in parts:
-                if part:
-                    if parts.index(part) % 2 == 1:
-                        # Add bold text
-                        p.add_run(part).bold = True
-                    else:
-                        # Add non-bold text
-                        p.add_run(part)
-
-            # Check if the section contains headings
-            if "#" in section:
-                heading_parts = section.split("#")
-                for part in heading_parts:
-                    if part:
-                        level = heading_parts.index(part) + 1
-                        doc.add_heading(part, level)
-
-                        
-
-            # Check if the section contains tables
-            if "|" in section:
-                # Split the text into table rows
-                rows = section.split("\n")
-                table = doc.add_table(rows=1, cols=len(rows[0].split("|")))
-                # Initialize your table
-                table = doc.tables[0]  # Assuming you have a Word document with tables
-
-                num_rows = len(table.rows)
-                num_cols = len(table.columns)
-                for row_idx in range(num_rows):
-                    for col_idx in range(num_cols):
-                        cell = section.split("\n")[row_idx].split("|")[col_idx]
-                        table.cell(row_idx, col_idx).text = cell
+            if "|" in section_text:
+                add_markdown_table(doc, section_text)
 
         # Save the Word document to a BytesIO object
         mem_file = io.BytesIO()
         doc.save(mem_file)
         mem_file.seek(0)
 
-        # Create a download button
-        st.download_button("Download Business Proposal (Word)", mem_file.getvalue(), "business_proposal.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        # Create download buttons
+        st.download_button(
+            "Download Business Proposal (PDF)",
+            pdf_mem_file.getvalue(),
+            "business_proposal.pdf",
+            "application/pdf"
+        )
+
+        st.download_button(
+            "Download Business Proposal (Word)",
+            mem_file.getvalue(),
+            "business_proposal.docx",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
 
              
             

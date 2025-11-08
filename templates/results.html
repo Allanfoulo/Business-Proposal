@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Generated Proposal</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+  </head>
+  <body class="bg-gray-50 min-h-screen">
+    <div class="max-w-5xl mx-auto py-10 px-4">
+      <div class="flex items-center justify-between mb-6">
+        <h1 class="text-2xl font-semibold text-gray-900">Generated Proposal</h1>
+        <a href="/" class="text-blue-600 hover:underline">Back</a>
+      </div>
+
+      {% if pdf_b64 and docx_b64 %}
+      <div class="mb-6 flex gap-3">
+        <a download="proposal.pdf" href="data:application/pdf;base64,{{ pdf_b64 }}" class="bg-green-600 text-white px-3 py-2 rounded">Download PDF</a>
+        <a download="proposal.docx" href="data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,{{ docx_b64 }}" class="bg-indigo-600 text-white px-3 py-2 rounded">Download DOCX</a>
+      </div>
+      {% else %}
+      {% if streaming_enabled %}
+      <form method="POST" action="/build/{{ job_id }}" class="mb-6">
+        <button type="submit" id="build-btn" class="bg-blue-600 text-white px-4 py-2 rounded disabled:opacity-50" disabled>Build Exports</button>
+      </form>
+      {% endif %}
+      {% endif %}
+
+      <div class="space-y-6">
+        {% for key in section_order %}
+        <section class="bg-white rounded-lg shadow p-4">
+          <div class="flex items-center justify-between mb-2">
+            <h2 class="text-lg font-semibold text-gray-800">{{ headers[key] }}</h2>
+            <span id="status-{{ key }}" class="text-xs text-gray-500">{% if streaming_enabled %}Streaming...{% else %}Done{% endif %}</span>
+          </div>
+          <pre id="content-{{ key }}" class="whitespace-pre-wrap text-sm text-gray-800">{{ results.get(key, '') }}</pre>
+        </section>
+        {% endfor %}
+      </div>
+    </div>
+
+    {% if streaming_enabled %}
+    <script id="sections-json" type="application/json">{{ section_order | tojson }}</script>
+    <script>
+      const jobId = '{{ job_id }}';
+      const provider = '{{ provider }}';
+      const model = '{{ model }}';
+      const sections = JSON.parse(document.getElementById('sections-json').textContent);
+
+      let completed = 0;
+      const total = sections.length;
+
+      function enableBuildIfDone() {
+        if (completed >= total) {
+          const btn = document.getElementById('build-btn');
+          if (btn) btn.disabled = false;
+        }
+      }
+
+      sections.forEach((key) => {
+        const statusEl = document.getElementById(`status-${key}`);
+        const contentEl = document.getElementById(`content-${key}`);
+        const url = `/stream/${encodeURIComponent(key)}?job_id=${encodeURIComponent(jobId)}&provider=${encodeURIComponent(provider)}&model=${encodeURIComponent(model)}`;
+        const es = new EventSource(url);
+
+        es.addEventListener('chunk', (e) => {
+          contentEl.textContent += e.data;
+        });
+
+        es.addEventListener('done', () => {
+          statusEl.textContent = 'Done';
+          es.close();
+          completed += 1;
+          enableBuildIfDone();
+        });
+
+        es.addEventListener('error', (e) => {
+          statusEl.textContent = 'Error';
+          es.close();
+          completed += 1;
+          enableBuildIfDone();
+        });
+
+        es.onmessage = (e) => {
+          // Fallback handler if server sends default message events
+          contentEl.textContent += e.data;
+        };
+      });
+    </script>
+    {% endif %}
+  </body>
+</html>
